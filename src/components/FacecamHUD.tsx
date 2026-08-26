@@ -25,6 +25,10 @@ import {
   type GazeDirection,
   type SecondSample,
 } from "@/lib/focusTracking";
+import { ParameterEngine } from "@/lib/parameterEngine";
+import { calculateDeepTechScore } from "@/lib/deepTech";
+import { recorder } from "@/lib/recorder";
+import { LandmarkProcessor } from "@/lib/landmarkProcessor";
 
 const TASKS_VISION_VERSION = "1.0.1";
 const WASM_BASE = `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${TASKS_VISION_VERSION}/wasm`;
@@ -64,6 +68,8 @@ const GAZE_COLOR: Record<GazeDirection, string> = {
   down: "var(--thinking)",
   none: "var(--sad)",
 };
+
+const vpe = new ParameterEngine();
 
 type LogEntry = { t: string; msg: string; emotion: Emotion };
 
@@ -191,10 +197,12 @@ export default function FacecamHUD() {
   const landmarkerRef = useRef<FaceLandmarker | null>(null);
   const detectorRef = useRef<FaceDetector | null>(null);
   const drawingUtilsRef = useRef<DrawingUtils | null>(null);
+  const processorRef = useRef(new LandmarkProcessor());
   const lastFaceCountRef = useRef(0);
-  const latestPrimaryRef = useRef<{ confidence: number | null; pose: HeadPose | null }>({
+  const latestPrimaryRef = useRef<{ confidence: number | null; pose: HeadPose | null; deepTechScore: number | null }>({
     confidence: null,
     pose: null,
+    deepTechScore: null,
   });
   const sessionStartRef = useRef(0);
   const lastGazeAwayLogRef = useRef(0);
@@ -301,7 +309,23 @@ export default function FacecamHUD() {
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
     const faceLandmarks = landmarkResult.faceLandmarks;
-    const boxes = faceLandmarks.map((pts) => boxFromLandmarks(pts, vw, vh));
+    const rawBoxes = faceLandmarks.map((pts) => boxFromLandmarks(pts, vw, vh));
+
+    const trackIds = trackerRef.current.update(
+      rawBoxes.map((b) => ({
+        cx: b.x + b.width / 2,
+        cy: b.y + b.height / 2,
+        w: b.width,
+        h: b.height,
+      })),
+      now,
+    );
+
+    const smoothedLandmarks = faceLandmarks.map((pts, i) =>
+      processorRef.current.smooth(trackIds[i], pts)
+    );
+    const boxes = smoothedLandmarks.map((pts) => boxFromLandmarks(pts, vw, vh));
+
 
     // Pair each landmark face with the nearest FaceDetector detection to read
     // its real detection-confidence score.
@@ -373,6 +397,19 @@ export default function FacecamHUD() {
         color,
         lineWidth: 1.6,
       });
+
+      // Precision Markers: Iris and Mouth Corners
+      ctx.fillStyle = color;
+      ctx.shadowColor = color;
+      ctx.shadowBlur = 10;
+      [468, 473, 61, 291].forEach(idx => {
+        const p = pts[idx];
+        ctx.beginPath();
+        ctx.arc(p.x * vw, p.y * vh, 2, 0, Math.PI * 2);
+        ctx.fill();
+      });
+      ctx.shadowBlur = 0;
+
       drawTargetBox(ctx, box, color);
       if (matrix) {
         const nose = pts[NOSE_TIP_INDEX]!;
@@ -425,10 +462,28 @@ export default function FacecamHUD() {
       (best, r) => (!best || r.area > best.area ? r : best),
       null,
     );
+    const deepTechScore = primary
+      ? calculateDeepTechScore(primary.pose, primary.scores, primary.area, vpe)
+      : null;
     latestPrimaryRef.current = {
       confidence: primary?.confidence ?? null,
       pose: primary?.pose ?? null,
+      deepTechScore,
     };
+
+    // Background High-Res Recording (Every Frame)
+    if (primary) {
+      recorder.record({
+        id: primary.id,
+        confidence: primary.confidence,
+        pose: primary.pose,
+        scores: primary.scores,
+        dominant: primary.dominant,
+        area: primary.area,
+        deepTechScore,
+      });
+    }
+
     if (primary) {
       const conf = primary.scores[primary.dominant];
       const last = lastCalloutRef.current;
@@ -458,7 +513,7 @@ export default function FacecamHUD() {
   useEffect(() => {
     if (phase !== "live") return;
     const id = setInterval(() => {
-      const { confidence, pose } = latestPrimaryRef.current;
+      const { confidence, pose, deepTechScore } = latestPrimaryRef.current;
       const gaze = gazeDirectionFromPose(pose);
       const focusScore = focusScoreFromPose(pose);
       const tSec = Math.round((Date.now() - sessionStartRef.current) / 1000);
@@ -469,6 +524,11 @@ export default function FacecamHUD() {
         confidence,
         yaw: pose?.yaw ?? null,
         pitch: pose?.pitch ?? null,
+        distance: pose?.distance ?? null,
+        area: faces.length > 0
+          ? faces.reduce((best, r) => r.area > (best?.area ?? -1) ? r : best, null)?.area ?? null
+          : null,
+        deepTechScore,
         gaze,
         focusScore,
       };
@@ -503,6 +563,19 @@ export default function FacecamHUD() {
     URL.revokeObjectURL(url);
   }, [samples]);
 
+  const exportHighResLog = useCallback(async () => {
+    const data = await recorder.dump();
+    if (data.length === 0) return;
+    const json = JSON.stringify(data, null, 2);
+    const blob = new Blob([json], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `milyonus-optic-highres-log-${new Date().toISOString().replace(/[:.]/g, "-")}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }, []);
+
   const start = useCallback(async () => {
     setPhase("loading");
     try {
@@ -513,9 +586,9 @@ export default function FacecamHUD() {
           baseOptions: { modelAssetPath: FACE_LANDMARKER_MODEL, delegate },
           runningMode: "VIDEO",
           numFaces: MAX_FACES,
-          minFaceDetectionConfidence: 0.5,
-          minFacePresenceConfidence: 0.5,
-          minTrackingConfidence: 0.5,
+          minFaceDetectionConfidence: 0.3,
+          minFacePresenceConfidence: 0.3,
+          minTrackingConfidence: 0.3,
           outputFaceBlendshapes: true,
           outputFacialTransformationMatrixes: true,
         });
@@ -523,7 +596,7 @@ export default function FacecamHUD() {
         FaceDetector.createFromOptions(vision, {
           baseOptions: { modelAssetPath: FACE_DETECTOR_MODEL, delegate },
           runningMode: "VIDEO",
-          minDetectionConfidence: 0.5,
+          minDetectionConfidence: 0.3,
         });
 
       let landmarker: FaceLandmarker;
@@ -757,6 +830,9 @@ export default function FacecamHUD() {
                   ["Pitch", primary ? `${primary.pose.pitch.toFixed(1)}°` : "--"],
                   ["Roll", primary ? `${primary.pose.roll.toFixed(1)}°` : "--"],
                   ["Depth", primary ? primary.pose.distance.toFixed(2) : "--"],
+                  ["Deep Tech", latestPrimaryRef.current.deepTechScore != null ? `${(latestPrimaryRef.current.deepTechScore * 100).toFixed(1)}%` : "--"],
+                  ["EAR (L/R)", `${earL.toFixed(2)} / ${earR.toFixed(2)}`],
+                  ["MAR", mar.toFixed(2)],
                   ["State", dominant],
                 ].map(([k, v]) => (
                   <div key={k} className="flex justify-between border-b border-white/10 py-1">
@@ -866,13 +942,21 @@ export default function FacecamHUD() {
             <h2 className="text-[10px] uppercase tracking-[0.32em] text-muted-foreground">
               Per-Minute Report
             </h2>
-            <button
-              onClick={exportCsv}
-              disabled={samples.length === 0}
-              className="btn-brand px-4 py-1.5 text-[10px] uppercase tracking-[0.16em] disabled:opacity-40"
-            >
-              Export CSV
-            </button>
+              <div className="flex gap-2">
+                <button
+                  onClick={exportCsv}
+                  disabled={samples.length === 0}
+                  className="btn-brand px-4 py-1.5 text-[10px] uppercase tracking-[0.16em] disabled:opacity-40"
+                >
+                  Export CSV
+                </button>
+                <button
+                  onClick={exportHighResLog}
+                  className="btn-brand px-4 py-1.5 text-[10px] uppercase tracking-[0.16em] opacity-80"
+                >
+                  High-Res Log
+                </button>
+              </div>
           </div>
           {minuteReports.length === 0 ? (
             <p className="text-[11px] text-muted-foreground">Awaiting first minute of samples…</p>

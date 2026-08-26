@@ -36,6 +36,9 @@ export interface SecondSample {
   confidence: number | null;
   yaw: number | null;
   pitch: number | null;
+  distance: number | null;
+  area: number | null;
+  deepTechScore: number | null;
   gaze: GazeDirection;
   focusScore: number;
 }
@@ -84,7 +87,7 @@ export function buildMinuteReports(samples: readonly SecondSample[]): MinuteRepo
 }
 
 export function samplesToCsv(samples: readonly SecondSample[]): string {
-  const header = "second,timestamp,has_face,confidence,yaw_deg,pitch_deg,gaze,focus_score\n";
+  const header = "second,timestamp,has_face,confidence,yaw_deg,pitch_deg,distance,area,deep_tech_score,gaze,focus_score\n";
   const rows = samples.map((s) =>
     [
       s.tSec,
@@ -93,6 +96,9 @@ export function samplesToCsv(samples: readonly SecondSample[]): string {
       s.confidence != null ? s.confidence.toFixed(4) : "",
       s.yaw != null ? s.yaw.toFixed(2) : "",
       s.pitch != null ? s.pitch.toFixed(2) : "",
+      s.distance != null ? s.distance.toFixed(2) : "",
+      s.area != null ? s.area.toFixed(0) : "",
+      s.deepTechScore != null ? s.deepTechScore.toFixed(4) : "",
       s.gaze,
       s.focusScore.toFixed(4),
     ].join(","),

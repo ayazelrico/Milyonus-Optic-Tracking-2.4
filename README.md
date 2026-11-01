@@ -1,3 +1,15 @@
+<div align="center">
+
+<img src="docs/assets/milyonus-wordmark-lg.png" alt="Milyonus" width="640" />
+
+**Browser-based facial optic tracking by Milyonus.**
+
+[Website](https://www.milyonus.com) · [Repository](https://github.com/ayazelrico/Milyonus-Optic-Tracking-2.4)
+
+</div>
+
+---
+
 # Milyonus Optic Tracking 2.4
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
